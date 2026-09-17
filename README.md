@@ -3,6 +3,8 @@
 ## Descripción
 Este proyecto resuelve el desafío técnico de Seguridad Informática, implementando el intercambio de llaves TR-31 y KEK bajo lineamientos PCI PIN.
 
+La explicación completa del flujo criptográfico, las fórmulas matemáticas, TR-31 y DUKPT está disponible en [EXPLICACION_TECNICA.md](EXPLICACION_TECNICA.md).
+
 ## Requisitos
 Instalar dependencias:
 ```bash
