@@ -1,631 +1,399 @@
-# Explicación técnica del software de intercambio de llaves
+# Guía del reto: conceptos, cálculos y recorrido del software
 
-## 1. Objetivo del reto
+Esta guía está dividida en dos partes:
 
-El software implementa un flujo simplificado de intercambio seguro de llaves usado en entornos de pagos:
+1. **Conceptos y ejemplos del reto:** qué significa cada valor, de dónde viene y cómo se calcula.
+2. **Código e interfaz gráfica:** qué hace cada módulo y en qué paso de la pantalla ocurre.
 
-1. Recibe dos componentes independientes de una KEK.
-2. Recombinarlos mediante XOR para obtener la KEK.
-3. Verifica que la KEK sea correcta usando su KCV.
-4. Usa la KEK para desenvolver una BDK protegida dentro de un bloque TR-31.
-5. Verifica el KCV de la BDK.
-6. Usa la BDK en el bonus DUKPT para derivar una clave transaccional.
-7. Descifra el mensaje de prueba `MELI_Rocks!`.
-8. En el flujo de exportación, genera una PEK aleatoria y la protege con TR-31.
+> Los valores de claves que aparecen aquí pertenecen al ejercicio. En sistemas reales, las claves no deberían mostrarse en una GUI, guardarse en texto plano ni compartirse en documentación.
 
-La lógica criptográfica está en `key_exchange/crypto_utils.py`, el bonus DUKPT en `key_exchange/bonus.py`, la interfaz gráfica en `key_exchange/gui.py` y el modo automatizado en `key_exchange/cli.py`.
+# Parte 1. Conceptos y ejemplos del reto
 
----
+## 1. El reto en pocas palabras
 
-## 2. Conceptos principales
+El software recibe piezas y datos de una operación de pagos. Debe recomponer una clave de protección, comprobarla, abrir un paquete que contiene otra clave, volver a comprobarla y usarla para descifrar un mensaje de prueba.
 
-### 2.1 Claves y componentes
-
-Una clave criptográfica no debería circular necesariamente como un único valor visible. En este reto, la KEK se entrega dividida en dos componentes:
-
-- Componente 1: `db375bb9dce3b14947e04e92a9356ebbb6e456f3518aed92c8dbc891f22f55d6`
-- Componente 2: `1e924acdb5442d3000c0fc9b20101aff1bd7a9bc27d36888c50cef64a7c818b7`
-
-Cada componente tiene 64 caracteres hexadecimales, es decir:
-
-- 2 caracteres hexadecimales representan 1 byte.
-- 64 caracteres representan 32 bytes.
-- 32 bytes representan 256 bits.
-
-La KEK significa **Key Encryption Key**: es una clave usada para proteger o transportar otras claves, no para cifrar directamente los datos de la transacción.
-
-La BDK significa **Base Derivation Key**: es la clave base utilizada por DUKPT para derivar claves transaccionales únicas.
-
-La PEK significa **PIN Encryption Key**: es una clave que puede utilizarse para proteger datos relacionados con PIN, según el uso asignado en el key block.
-
----
-
-## 3. Obtención matemática de la KEK
-
-### 3.1 Conversión hexadecimal a bytes
-
-El software recibe los componentes como texto hexadecimal. La operación:
-
-```python
-bytes.fromhex(comp1_hex)
-```
-
-convierte cada pareja de caracteres hexadecimales en un byte.
-
-Por ejemplo:
+El recorrido principal es:
 
 ```text
-"AF" -> 0xAF -> 175
+dos componentes -> KEK -> comprobar KEK -> abrir TR-31 -> BDK
+BDK -> comprobar BDK -> derivar clave DUKPT -> descifrar mensaje
 ```
 
-Después de convertir ambos componentes, el programa confirma que tengan la misma longitud. No es válido aplicar XOR entre cadenas de tamaños diferentes.
+Cada flecha es una operación criptográfica concreta. Si una comprobación falla, el programa se detiene para no continuar con una clave incorrecta.
 
-### 3.2 XOR componente a componente
+## 2. Diccionario de términos
 
-La KEK se obtiene con XOR exclusivo byte por byte:
+| Término | Significado sencillo | Función en este reto |
+|---|---|---|
+| Clave | Valor secreto usado por un algoritmo criptográfico | Protege o transforma otros datos |
+| KEK | *Key Encryption Key* | Protege el transporte de otras claves |
+| KCV | *Key Check Value* | Huella corta para detectar errores al copiar o reconstruir una clave |
+| TR-31 | Formato estandarizado de bloque de claves | Transporta una clave protegida junto con metadatos y controles de integridad |
+| BDK | *Base Derivation Key* | Raíz usada por DUKPT para calcular claves de transacción |
+| KSN | *Key Serial Number* | Identifica el dispositivo/secuencia y contiene el contador DUKPT |
+| IPEK | *Initial PIN Encryption Key* | Clave inicial calculada desde BDK y KSN base |
+| DUKPT | *Derived Unique Key Per Transaction* | Esquema para derivar una clave distinta según el KSN de cada transacción |
+| Ciphertext | Texto cifrado | Los bytes que el bonus pide descifrar |
+| PEK | *PIN Encryption Key* | Clave que el módulo de exportación crea y protege en TR-31 |
 
-$$
-KEK = C_1 \oplus C_2
-$$
+## 3. Entradas del reto y de dónde salen
 
-Para cada posición $i$:
+La GUI carga por defecto estos datos de referencia. En un ejercicio, los valores “entregados” son las entradas del problema; otros valores, como la KEK y la BDK en claro, son resultados calculados al ejecutar el flujo.
 
-$$
-KEK_i = C_{1,i} \oplus C_{2,i}
-$$
+| Valor | ¿Entregado o calculado? | Uso |
+|---|---|---|
+| Componente 1 (`C1`) | Entregado | Primera pieza para reconstruir la KEK |
+| Componente 2 (`C2`) | Entregado | Segunda pieza para reconstruir la KEK |
+| `F74B90` | Entregado como KCV esperado | Comprobación de la KEK reconstruida |
+| Key block `D0112B0T...` | Entregado | Bloque TR-31 que contiene la BDK protegida |
+| `EABBDC` | Entregado como KCV esperado | Comprobación de la BDK extraída |
+| KSN `729C77361E9A51E000F2` | Entregado en el bonus/código | Parámetro de la derivación DUKPT |
+| Ciphertext `FCC832A91953151148E86A01BE9420AC` | Entregado en el bonus/código | Mensaje cifrado que hay que recuperar |
+| KEK, BDK, IPEK y clave DUKPT | Calculados | Resultados intermedios del flujo |
+| `MELI_Rocks!` | Resultado esperado | Texto recuperado al descifrar el ciphertext |
 
-Las propiedades importantes de XOR son:
+> **Distinción importante:** `F74B90` y `EABBDC` son referencias que el reto proporciona para comparar. El programa calcula los KCV a partir de las claves y comprueba si coinciden; no calcula esas claves a partir del KCV.
 
-$$
-A \oplus 0 = A
-$$
+## 4. Paso 1: reconstruir la KEK con XOR
 
-$$
-A \oplus A = 0
-$$
-
-$$
-(A \oplus B) \oplus B = A
-$$
-
-Con los componentes del reto, el resultado es:
+Los dos componentes entregados son:
 
 ```text
-C5A5117469A79C794720B20989257444AD33FF4F7659851A0DD727F555E74D61
+C1 = db375bb9dce3b14947e04e92a9356ebbb6e456f3518aed92c8dbc891f22f55d6
+C2 = 1e924acdb5442d3000c0fc9b20101aff1bd7a9bc27d36888c50cef64a7c818b7
 ```
 
-Esta es la KEK de 32 bytes que se utiliza en la protección TR-31.
+Cada pareja de caracteres hexadecimales es un byte. Por ejemplo, los primeros bytes son `DB` y `1E`. El programa aplica XOR por posición:
 
-### 3.3 Importancia de split knowledge
+$$
+KEK_i = C1_i \oplus C2_i
+$$
 
-La división busca que ninguna persona o canal individual conozca la KEK completa. En un entorno real, cada componente debería ser administrado por custodios, procesos o canales independientes.
-
-El XOR no hace que un componente sea mágicamente secreto si el otro componente queda expuesto. Si un atacante obtiene ambos valores, puede calcular la KEK inmediatamente. La seguridad depende de mantener separadas las responsabilidades y los componentes.
-
----
-
-## 4. Validación de la KEK mediante KCV
-
-### 4.1 Qué es un KCV
-
-KCV significa **Key Check Value**. Es un valor corto derivado de una clave para detectar errores de captura, transporte o combinación.
-
-Un KCV no es la clave y no debe considerarse una prueba de autenticación fuerte. En este proyecto se usan los primeros 3 bytes del resultado criptográfico:
+Ejemplo del primer byte, en binario:
 
 ```text
-3 bytes = 6 caracteres hexadecimales
+DB = 11011011
+1E = 00011110
+     -------- XOR
+C5 = 11000101
 ```
 
-El KCV esperado de la KEK es:
+Por eso el primer byte de la KEK calculada es `C5`. La operación se repite para los 32 bytes. La clave completa resultante es:
 
 ```text
-F74B90
+KEK = C5A5117469A79C794720B20989257444AD33FF4F7659851A0DD727F555E74D61
 ```
 
-### 4.2 KCV para claves TDES
+Los dos componentes tienen 64 caracteres hexadecimales, es decir, 32 bytes o 256 bits cada uno. La KEK resultante también mide 32 bytes, por lo que en este programa se trata como AES-256 al calcular su KCV.
 
-La KEK calculada tiene 32 bytes, pero el bloque TR-31 utilizado por `psec` permite usarla como clave de protección AES. Para el cálculo de KCV del proyecto, las claves de 16 o 24 bytes se validan mediante TDES sobre un bloque cero de 8 bytes.
+### ¿Por qué se usa XOR?
 
-Conceptualmente:
-
-$$
-KCV_{TDES} = \operatorname{Trunc}_3\left(\operatorname{3DES}_{K}(0^8)\right)
-$$
-
-Para una clave AES-256, la función del proyecto usa CMAC-AES:
+XOR combina bits con estas reglas: iguales producen `0`, distintos producen `1`. También cumple:
 
 $$
-KCV_{AES} = \operatorname{Trunc}_3\left(\operatorname{CMAC}_{AES_K}(0^{16})\right)
+A \oplus B \oplus B = A
 $$
 
-El algoritmo del KCV debe coincidir con la familia de la clave. Aplicar AES-CMAC a una clave TDES o aplicar TDES a una clave AES cambia el resultado y produce una validación incorrecta.
+En un esquema de componentes, conocer solo una pieza no permite obtener la otra ni reconstruir la KEK. Si se obtienen ambas, sí se puede recomponer la clave. Por eso la separación debe acompañarse de controles organizativos; XOR por sí solo no protege dos componentes que estén juntos.
 
-### 4.3 Validación implementada
+## 5. Paso 2: entender y calcular el KCV
 
-La función `validate_cmac_kcv` calcula el KCV y lo compara con el esperado:
+### 5.1 Qué comprueba
 
-```python
-if kcv != expected_kcv.upper():
-    raise ValueError(...)
+Un KCV es una huella corta calculada desde una clave. Sirve para comprobar que la clave reconstruida o importada coincide con la esperada. **No sirve para recuperar la clave ni para cifrar datos.**
+
+El flujo es:
+
+```text
+clave + bloque conocido -> algoritmo criptográfico -> resultado
+resultado -> tomar los primeros 3 bytes -> escribirlos en hexadecimal -> KCV
 ```
 
-Si el valor no coincide, el flujo se detiene antes de intentar desenvolver la clave.
+Tres bytes se muestran como seis caracteres hexadecimales, porque cada byte necesita dos caracteres (`F7 4B 90` se escribe `F74B90`).
 
----
+### 5.2 KCV exacto de la KEK de este reto
 
-## 5. Bloque TR-31 de la BDK
+La KEK tiene 32 bytes, así que `crypto_utils.py` sigue su rama AES-256. El código calcula CMAC-AES sobre un bloque de 16 bytes cero:
 
-### 5.1 Qué es TR-31
+$$
+T = CMAC_{AES-256, KEK}(00\ 00\ \ldots\ 00)
+$$
 
-TR-31 es un formato de key block para transportar claves criptográficas protegidas. Un key block combina:
+El bloque de entrada tiene exactamente 16 bytes. CMAC produce una etiqueta de 16 bytes. Con los datos de este reto, la salida completa calculada es:
 
-- Un encabezado con metadatos.
-- Material criptográfico protegido.
-- Un valor de autenticación que permite detectar manipulación.
-
-El software no descifra el texto TR-31 mediante operaciones manuales. Utiliza:
-
-```python
-from psec.tr31 import KeyBlock
+```text
+F74B9050C7E8D40716A7EEEC8A3B75CA
 ```
 
-Esto es importante porque el formato tiene reglas específicas de encabezado, longitud, padding, cifrado y autenticación.
+Ahora se toman los primeros tres bytes:
 
-### 5.2 Key block de referencia
+```text
+salida completa: F7 4B 90 50 C7 E8 D4 07 16 A7 EE EC 8A 3B 75 CA
+primeros 3 bytes: F7 4B 90
+KCV:              F7 4B 90 -> F74B90
+```
 
-El key block BDK del reto es:
+Ese `F74B90` coincide con el valor esperado que se introdujo en la GUI. Por eso la KEK se acepta.
+
+### 5.3 KCV exacto de la BDK
+
+La BDK extraída tiene 16 bytes, así que este programa usa Triple DES (3DES) en modo ECB sobre un bloque de 8 bytes cero:
+
+$$
+T = 3DES_{BDK}(00\ 00\ 00\ 00\ 00\ 00\ 00\ 00)
+$$
+
+Con la BDK del reto, la salida completa del bloque cifrado es:
+
+```text
+EABBDC0BBBFE30B1
+```
+
+Tomando los tres primeros bytes:
+
+```text
+salida completa: E A B B D C 0B BB FE 30 B1
+primeros 3 bytes: E A B B D C
+KCV:               E A B B D C -> EABBDC
+```
+
+El KCV calculado coincide con el KCV esperado de la BDK.
+
+### 5.4 Por qué hay dos fórmulas
+
+El formato del KCV depende del tipo/tamaño de clave en **esta implementación**:
+
+| Clave | Tamaño en este reto | Operación que hace el código | Primeros 3 bytes |
+|---|---:|---|---|
+| KEK | 32 bytes, AES-256 | CMAC-AES sobre 16 bytes cero | `F74B90` |
+| BDK | 16 bytes, 2-key TDES | 3DES-ECB sobre 8 bytes cero | `EABBDC` |
+
+No se debe aplicar una fórmula universal a todas las claves. Si se emplea otra familia, otra convención de KCV o una longitud no admitida, el resultado será distinto. Por eso en el reto fue importante corregir el cálculo según la longitud y familia de la clave.
+
+Un KCV de 3 bytes solo tiene 24 bits: puede detectar errores habituales, pero es demasiado corto para autenticar una clave con garantías criptográficas. La protección e integridad del key block TR-31 es una función distinta, realizada por la biblioteca TR-31.
+
+## 6. Paso 3: abrir el bloque TR-31 y obtener la BDK
+
+El valor entregado para la BDK es un bloque TR-31, no la clave BDK en claro:
 
 ```text
 D0112B0TX00E000080BF1D76A239777F8C2B605EB4FCF6DC9B9CFC6A5170C18282BDAB7D4D4D4559BC6A952101BA74EF8C1563BC2A73BF76
 ```
 
-Su encabezado comienza con:
+Se puede pensar en él como un paquete protegido. Contiene un encabezado con atributos de la clave y material protegido con controles de integridad. El prefijo `D0112B0T` indica propiedades/uso del bloque; no es la BDK en claro.
 
-```text
-D0112B0T...
-```
-
-El uso `B0` identifica el propósito de la clave como una clave base DUKPT en el contexto del reto.
-
-La clave se desenvuelve con:
-
-```python
-kb = KeyBlock(kbpk=kek)
-bdk = kb.unwrap(tr31_string)
-```
-
-Aquí `kbpk` significa **Key Block Protection Key**, que en este ejercicio es la KEK.
-
-### 5.3 Resultado de la desenvoltura
-
-Después de validar la KEK y desenvolver el bloque, la BDK obtenida es:
-
-```text
-39EDE3A9437F3FF561898D1F6FABBD25
-```
-
-Esta BDK tiene 16 bytes, por lo que se usa como clave TDES de dos llaves dentro del flujo DUKPT.
-
-El KCV esperado de la BDK es:
-
-```text
-EABBDC
-```
-
-El software no continúa al bonus hasta que este valor coincide.
-
-### 5.4 Diferencia entre BDK y PEK
-
-El archivo `pek_tr31.txt` generado por el módulo de exportación contiene una PEK nueva. Su encabezado normalmente comienza con:
-
-```text
-D0144P...
-```
-
-La letra `P` indica el uso PEK. Por tanto:
-
-- `D0112B0...` corresponde al key block BDK del reto.
-- `D0144P0...` corresponde a un key block PEK generado por la aplicación.
-
-No se debe utilizar `pek_tr31.txt` como si fuera el bloque BDK.
-
----
-
-## 6. Flujo de exportación de la PEK
-
-El módulo **Exportar PEK** de la GUI ejecuta estas etapas:
-
-### Paso 1: recombinar y validar la KEK
-
-Se convierten los dos componentes a bytes, se aplica XOR y se calcula el KCV de la KEK.
-
-El proceso solo continúa si el KCV coincide con `F74B90`.
-
-### Paso 2: generar la PEK
-
-La aplicación genera 32 bytes aleatorios mediante:
-
-```python
-os.urandom(32)
-```
-
-Esto representa una PEK AES-256 nueva.
-
-Como la generación es aleatoria, es normal que cambien en cada ejecución:
-
-- La PEK.
-- Su KCV.
-- El key block TR-31 completo.
-- El contenido de `pek_tr31.txt`.
-
-La KEK y la BDK de referencia no cambian.
-
-### Paso 3: envolver la PEK
-
-La PEK se protege con:
-
-```python
-wrap_tr31(pek, kek, usage="P")
-```
-
-La función crea un encabezado TR-31 para el uso de PIN/PEK y escribe el resultado en el archivo indicado.
-
----
-
-## 7. Flujo de importación de la BDK
-
-El módulo **Importar BDK** ejecuta exactamente este orden:
-
-### Paso 1: combinar y validar la KEK
+La KEK validada se usa como KBPK (*Key Block Protection Key*) para que la implementación TR-31 abra y valide el bloque:
 
 $$
-KEK = C_1 \oplus C_2
+BDK = unwrap_{KEK}(TR31\_block)
 $$
 
-Luego se compara el KCV calculado con `F74B90`.
-
-### Paso 2: desenvolver el key block
-
-La cadena TR-31 se procesa con la KEK. El resultado esperado es:
+La biblioteca devuelve:
 
 ```text
-39EDE3A9437F3FF561898D1F6FABBD25
+BDK = 39EDE3A9437F3FF561898D1F6FABBD25
 ```
 
-La GUI también rechaza explícitamente un archivo cuyo encabezado comienza con `D0144P`, porque ese valor identifica una PEK y no la BDK requerida.
+La BDK tiene 16 bytes. Se calcula su KCV y se compara con `EABBDC`, como se explicó arriba. La aplicación no debe continuar con DUKPT si el bloque no se puede abrir o si el KCV no coincide.
 
-### Paso 3: validar la BDK
+### BDK no es PEK
 
-Se calcula el KCV de la BDK y se compara con:
+El módulo de exportación genera una PEK y la envuelve con un encabezado distinto, que empieza con `D0144P...`. El key block recibido para este paso debe ser BDK (`D0112B0T...`). No son intercambiables: describen claves destinadas a usos diferentes.
 
-```text
-EABBDC
-```
+## 7. Paso 4: derivar una clave DUKPT
 
-### Paso 4: ejecutar DUKPT
+### 7.1 Qué se quiere conseguir
 
-La BDK validada se usa para derivar una clave transaccional a partir del KSN del reto.
+La BDK es una clave raíz. En el esquema DUKPT, no se cifra cada transacción directamente con la BDK: la BDK y el KSN se procesan para derivar una clave correspondiente a esa transacción.
 
-La GUI muestra cada resultado en una tarjeta visual. El paso DUKPT solo aparece como completado cuando la derivación y el descifrado terminan correctamente.
+De forma conceptual:
 
----
+$$
+K_{transacción} = F(BDK, KSN)
+$$
 
-## 8. DUKPT: concepto matemático
+`F` representa el conjunto de operaciones DUKPT; no es una suma simple. Si cambia el KSN de transacción, cambia la clave derivada.
 
-### 8.1 Qué significa DUKPT
+### 7.2 KSN del reto
 
-DUKPT significa **Derived Unique Key Per Transaction**. El objetivo es que cada transacción utilice una clave diferente derivada de:
-
-- Una BDK compartida de forma segura.
-- Un KSN asociado al dispositivo.
-- Un contador de transacciones.
-
-El sistema no transmite la BDK como clave de trabajo. La BDK sirve como raíz para generar claves derivadas.
-
-### 8.2 KSN del reto
-
-El KSN utilizado es:
+El KSN usado por el bonus es:
 
 ```text
 729C77361E9A51E000F2
 ```
 
-El KSN contiene información de identificación y un contador de 21 bits. El contador permite generar una secuencia de claves distintas para un mismo dispositivo.
-
-El contador de 21 bits puede representar valores desde:
-
-$$
-0 \quad \text{hasta} \quad 2^{21}-1
-$$
-
-Es decir, hasta 2.097.151 posiciones posibles antes de agotar el espacio del contador.
-
-### 8.3 Generación del IPEK
-
-El primer paso DUKPT es generar el IPEK, o **Initial PIN Encryption Key**.
-
-La BDK de 16 bytes se expande a una clave 3DES de 24 bytes:
-
-$$
-K_{3DES} = BDK \mathbin{||} BDK[0:8]
-$$
-
-donde `||` significa concatenación.
-
-El KSN se prepara poniendo en cero su contador. Después se cifran los primeros 8 bytes del KSN con 3DES:
-
-$$
-IPEK_L = 3DES_{K_{3DES}}(KSN_{base}[0:8])
-$$
-
-Para obtener la mitad derecha se aplica una máscara conocida:
+Tiene 10 bytes. Su parte baja incluye un contador de 21 bits. En este valor, los últimos tres bytes son `E000F2`; al aplicar la máscara de contador `1FFFFF`, se obtiene:
 
 ```text
-C0C0C0C000000000C0C0C0C000000000C0C0C0C000000000
+E000F2 AND 1FFFFF = 0000F2 = 242 decimal
 ```
 
-La clave enmascarada es:
+El algoritmo usa los bits de ese contador para saber qué etapas de derivación aplicar. No usa solo el número `242`: también utiliza la parte de identificación/base del KSN y la BDK.
 
-$$
-K' = K_{3DES} \oplus Mask
-$$
+### 7.3 IPEK y clave derivada
 
-y se calcula:
+La implementación local del proyecto hace, resumidamente:
 
-$$
-IPEK_R = 3DES_{K'}(KSN_{base}[0:8])
-$$
+1. Toma la BDK de 16 bytes y la expande a 24 bytes para 3DES repitiendo sus primeros 8 bytes: `BDK || BDK[0:8]`.
+2. Pone a cero el contador del KSN para formar el KSN base.
+3. Cifra la parte correspondiente del KSN base con 3DES para obtener dos mitades del IPEK; la segunda mitad utiliza la BDK modificada con la máscara definida por DUKPT.
+4. Recorre los bits activos del contador. Para cada bit aplica las operaciones DES/XOR y máscaras de derivación definidas por el algoritmo.
 
-Finalmente:
-
-$$
-IPEK = IPEK_L \mathbin{||} IPEK_R
-$$
-
-Para este reto, el IPEK obtenido es:
+Con los valores del reto, el IPEK intermedio es:
 
 ```text
-db833e79b68b868c285534462f0099b5
+DB833E79B68B868C285534462F0099B5
 ```
 
-### 8.4 Registro de clave actual
-
-El algoritmo conserva un registro de 16 bytes llamado `curkey`. Inicialmente:
-
-$$
-curkey = IPEK
-$$
-
-También prepara una versión del KSN sin los bits de contador y examina el contador mediante máscaras de bits.
-
-### 8.5 Procesamiento bit a bit del contador
-
-Se utiliza un registro de selección que empieza en:
-
-```text
-000100
-```
-
-En cada iteración se desplaza un bit hacia la derecha:
-
-$$
-SR_{i+1} = SR_i >> 1
-$$
-
-Se calcula una intersección bit a bit entre el registro de selección y el contador:
-
-$$
-T = SR \land Counter
-$$
-
-Si $T$ no es cero, ese bit del contador debe procesarse.
-
-El contador parcial se actualiza con OR:
-
-$$
-R8 = R8 \lor SR
-$$
-
-Luego el algoritmo calcula la mitad derecha de la clave derivada mediante una operación tipo ANSI X9.24:
-
-1. Separar la mitad derecha de `curkey`.
-2. Aplicar XOR con el registro `R8`.
-3. Cifrar el resultado con DES usando la mitad izquierda de `curkey`.
-4. Volver a aplicar XOR con la mitad derecha original.
-
-Formalmente, para la primera parte:
-
-$$
-R8A = DES_{curkey_L}(R8 \oplus curkey_R) \oplus curkey_R
-$$
-
-Después se modifica la clave con la máscara de derivación:
-
-$$
-curkey' = curkey \oplus C\_MASK
-$$
-
-La máscara de derivación de 16 bytes es:
-
-```text
-C0C0C0C000000000C0C0C0C000000000
-```
-
-Se repite el proceso con la clave enmascarada:
-
-$$
-R8B = DES_{curkey'_L}(R8 \oplus curkey'_R) \oplus curkey'_R
-$$
-
-El nuevo registro de clave se forma como:
-
-$$
-curkey = R8B \mathbin{||} R8A
-$$
-
-Este procedimiento se repite para cada bit activo del contador del KSN.
-
-### 8.6 Clave derivada del reto
-
-Para el BDK y KSN proporcionados, la clave transaccional derivada es:
+Y la clave DUKPT final que devuelve el código es:
 
 ```text
 F0BBF26A9B1D48220ED642709E5C4454
 ```
 
-La clave tiene 16 bytes y se utiliza como clave TDES de dos llaves.
+La derivación es determinista: misma BDK y mismo KSN producen la misma clave; cambiar el KSN produce otra derivación. El IPEK sirve como valor intermedio y no es el ciphertext ni el mensaje claro.
 
----
+## 8. Paso 5: descifrar el bonus
 
-## 9. Descifrado del mensaje del bonus
-
-El ciphertext del reto es:
+El ciphertext entregado al bonus es:
 
 ```text
 FCC832A91953151148E86A01BE9420AC
 ```
 
-Tiene 16 bytes, es decir, dos bloques de 8 bytes. El software usa TDES en modo ECB:
+La clave derivada de DUKPT se usa para descifrarlo con 3DES en modo ECB, según los datos y el formato de este ejercicio:
 
 $$
-Plaintext = 3DES^{-1}_{K_{DUKPT}}(Ciphertext)
+P = 3DES^{-1}_{K_{DUKPT}}(C)
 $$
 
-El resultado hexadecimal es:
+La salida tiene 16 bytes:
 
 ```text
-4D454C495F526F636B73210000000000
+hex:   4D454C495F526F636B73210000000000
+texto: MELI_Rocks!\x00\x00\x00\x00\x00
 ```
 
-La conversión a texto produce:
+Los primeros 11 bytes son los caracteres UTF-8/ASCII de `MELI_Rocks!`; los cinco bytes finales `00` son relleno del dato de prueba. El programa los quita con `rstrip(b"\x00")` antes de decodificar el texto.
 
-```text
-MELI_Rocks!
-```
+## 9. Resumen de entradas, operaciones y resultados
 
-Los bytes finales `00` son padding nulo. Por eso el programa utiliza:
+| Paso | Entrada | Operación | Resultado usado en el paso siguiente |
+|---|---|---|---|
+| Reconstrucción | `C1`, `C2` | XOR byte a byte | KEK `C5A5...4D61` |
+| Validación KEK | KEK de 32 bytes | CMAC-AES(16 bytes cero), primeros 3 bytes | `F74B90` |
+| Apertura de clave | KEK + bloque TR-31 | `unwrap` TR-31 | BDK `39ED...BD25` |
+| Validación BDK | BDK de 16 bytes | 3DES-ECB(8 bytes cero), primeros 3 bytes | `EABBDC` |
+| Derivación | BDK + KSN | Algoritmo DUKPT | `F0BB...4454` |
+| Descifrado | clave DUKPT + ciphertext | 3DES-ECB decrypt | `MELI_Rocks!` |
 
-```python
-plaintext.rstrip(b"\x00")
-```
+# Parte 2. Cómo funciona el código y cómo verlo en la GUI
 
-antes de decodificar UTF-8.
+## 10. Archivos principales
 
----
+| Archivo | Responsabilidad |
+|---|---|
+| `key_exchange/__main__.py` | Abre la GUI si se ejecuta sin argumentos; con argumentos conserva la entrada al CLI |
+| `key_exchange/gui.py` | Construye las pestañas, campos, tarjetas de estado y coordina los pasos visibles |
+| `key_exchange/crypto_utils.py` | XOR, cálculo/validación de KCV, creación de claves y operaciones TR-31 |
+| `key_exchange/bonus.py` | Implementa la derivación DUKPT local y descifra el ciphertext del bonus |
+| `key_exchange/cli.py` | Ofrece los mismos flujos de exportación/importación desde comandos |
 
-## 10. Arquitectura del software
+La interfaz no implementa por su cuenta los algoritmos: recoge los datos, llama a las funciones criptográficas y muestra el resultado o error de cada etapa.
 
-### `key_exchange/crypto_utils.py`
+## 11. Cómo iniciar la interfaz
 
-Contiene las primitivas de alto nivel:
+Desde la carpeta del proyecto:
 
-- `xor_components`: combina los componentes de KEK.
-- `calculate_cmac_kcv`: calcula el KCV según el tamaño y familia de la clave.
-- `validate_cmac_kcv`: compara el KCV calculado con el esperado.
-- `wrap_tr31`: protege una clave dentro de un key block TR-31.
-- `unwrap_tr31`: desenvuelve una clave desde TR-31.
-- `generate_aes256_key`: genera una PEK aleatoria de 32 bytes.
-
-### `key_exchange/bonus.py`
-
-Contiene la implementación local DUKPT:
-
-- `LocalDUKPTServer`: genera el IPEK y la clave derivada.
-- `decrypt_bonus_dukpt`: deriva la clave y descifra el ciphertext.
-- `run_bonus_dukpt`: imprime el resultado del bonus para el CLI.
-
-La implementación local evita la dependencia externa que provocaba errores de longitudes incompatibles en operaciones XOR.
-
-### `key_exchange/cli.py`
-
-Mantiene la ejecución automatizada:
-
-- `export-pek` genera y protege una PEK.
-- `import-bdk` valida la KEK, desenvuelve la BDK y ejecuta el bonus.
-
-### `key_exchange/gui.py`
-
-Proporciona dos módulos visuales:
-
-- **Exportar PEK**.
-- **Importar BDK**.
-
-Cada módulo muestra el estado de cada paso. La interfaz usa un panel desplazable para evitar que los campos, valores largos y tarjetas de resultado se superpongan.
-
-### `key_exchange/__main__.py`
-
-Decide el modo de ejecución:
-
-- Sin argumentos: abre la GUI.
-- Con argumentos: conserva el CLI.
-
-```bash
-python -m key_exchange
-python -m key_exchange import-bdk ...
-```
-
----
-
-## 11. Ejecución
-
-Desde el directorio `meli_challenge`:
-
-### Interfaz gráfica
-
-```bash
+```powershell
 python -m key_exchange
 ```
 
-### Exportar PEK
+El punto de entrada detecta que no hay argumentos y ejecuta `run_gui()`. Si se pasa un comando como `export-pek` o `import-bdk`, se usa el CLI en vez de abrir la ventana.
 
-```bash
-python -m key_exchange export-pek \
-  --kek-component-1 db375bb9dce3b14947e04e92a9356ebbb6e456f3518aed92c8dbc891f22f55d6 \
-  --kek-component-2 1e924acdb5442d3000c0fc9b20101aff1bd7a9bc27d36888c50cef64a7c818b7 \
-  --kek-kcv F74B90 \
-  --out pek_tr31.txt
-```
+La ventana tiene dos pestañas:
 
-### Importar BDK
+- **Exportar PEK:** crea una clave nueva y la protege en un bloque TR-31.
+- **Importar BDK:** abre el bloque BDK de referencia, valida la clave y ejecuta DUKPT.
 
-```bash
-python -m key_exchange import-bdk \
-  --kek-component-1 db375bb9dce3b14947e04e92a9356ebbb6e456f3518aed92c8dbc891f22f55d6 \
-  --kek-component-2 1e924acdb5442d3000c0fc9b20101aff1bd7a9bc27d36888c50cef64a7c818b7 \
-  --kek-kcv F74B90 \
-  --bdk-keyblock D0112B0TX00E000080BF1D76A239777F8C2B605EB4FCF6DC9B9CFC6A5170C18282BDAB7D4D4D4559BC6A952101BA74EF8C1563BC2A73BF76 \
-  --bdk-kcv EABBDC
-```
+## 12. Pestaña “Importar BDK”: correspondencia pantalla-código
 
----
+Esta pestaña representa el flujo principal del reto. Los campos se precargan con los componentes, KCV esperados y bloque TR-31 de referencia.
 
-## 12. Resultados esperados
+| Lo que ves | Lo que hace el programa | Función/código relacionado |
+|---|---|---|
+| Componente KEK 1 y 2 | Convierte el hexadecimal en bytes y combina ambos | `xor_components()` en `crypto_utils.py` |
+| KCV esperado KEK (`F74B90`) | Calcula el KCV de la KEK y compara | `calculate_cmac_kcv()` y `validate_cmac_kcv()` |
+| Key block BDK | Comprueba el tipo de bloque y lo abre con la KEK | `unwrap_tr31()`; usa `KeyBlock` de `psec` |
+| KCV esperado BDK (`EABBDC`) | Calcula el KCV de la BDK y compara | `calculate_cmac_kcv()` y `validate_cmac_kcv()` |
+| Botón “Ejecutar importación paso a paso” | Llama a `_run_import()` | Método de `KeyExchangeApp` |
 
-Si se utilizan los valores de referencia correctos:
+Al ejecutar, la GUI completa cuatro tarjetas en este orden:
+
+1. **Recombinar componentes y validar KEK.** La tarjeta indica que la KEK pasó la comparación del KCV. Por diseño, no es necesario presentar la KEK en claro en esa tarjeta.
+2. **Desenvolver key block TR-31.** Se obtiene la BDK. La implementación actual muestra su hexadecimal para que el ejercicio sea observable.
+3. **Validar KCV de la BDK.** Solo se continúa si coincide con `EABBDC`.
+4. **Derivar clave DUKPT y descifrar mensaje.** Se usa la BDK, el KSN y el ciphertext del bonus. La tarjeta muestra el texto y la clave derivada.
+
+Si hay un error, la tarjeta pendiente correspondiente cambia a estado de error y aparece un mensaje. Por ejemplo, un KCV incorrecto detiene el flujo antes de desenvolver o derivar. Si se carga un bloque PEK (`D0144P...`), el programa lo rechaza porque se esperaba el bloque BDK (`D0112B0T...`).
+
+## 13. Pestaña “Exportar PEK”: correspondencia pantalla-código
+
+La pestaña de exportación no es otro modo de calcular la BDK. Demuestra el flujo inverso: crear una PEK y transportarla protegida con TR-31.
+
+1. **Recombinar componentes y validar KEK.** Reutiliza los mismos componentes y cálculo de KCV.
+2. **Generar PEK AES-256.** `generate_aes256_key()` usa una fuente aleatoria segura (`os.urandom(32)`). La PEK cambia en cada ejecución; eso es esperado. La GUI muestra su KCV, no necesita mostrar la PEK en claro.
+3. **Envolver PEK en TR-31.** `wrap_tr31()` crea los atributos del key block para el uso PEK y lo protege usando la KEK. `gui.py` escribe el bloque en la ruta indicada, por defecto `pek_tr31.txt`.
+
+El flujo de exportación, resumido:
 
 ```text
-KEK KCV: F74B90
-BDK: 39EDE3A9437F3FF561898D1F6FABBD25
-BDK KCV: EABBDC
-DUKPT key: F0BBF26A9B1D48220ED642709E5C4454
-Mensaje: MELI_Rocks!
+componentes -> KEK verificada -> PEK aleatoria -> PEK protegida en TR-31 -> archivo
 ```
 
-En la exportación, la PEK y su KCV serán diferentes cada vez. Eso es correcto porque la PEK se genera aleatoriamente.
+## 14. Qué hace cada función criptográfica
 
----
+### `xor_components(comp1_hex, comp2_hex)`
 
-## 13. Consideraciones de seguridad
+Convierte ambas cadenas hexadecimales en bytes, comprueba que tengan la misma longitud y aplica XOR byte por byte. Si el hexadecimal es inválido o las longitudes son distintas, lanza un error.
 
-Este proyecto es educativo y reproduce el flujo del reto. Para un sistema de producción se deberían considerar, como mínimo:
+### `calculate_cmac_kcv(key)`
 
-- Usar un HSM para generar, importar y custodiar claves.
-- No mostrar claves en claro en la interfaz ni en logs.
-- No guardar bloques de claves generados en ubicaciones sin protección.
-- Proteger los componentes de KEK con split knowledge y dual control.
-- Validar y registrar eventos sin imprimir material secreto.
-- Usar versiones actuales y compatibles de las bibliotecas criptográficas.
-- Evitar ECB para nuevos diseños; aquí se utiliza porque forma parte del algoritmo y los vectores del reto.
-- Rotar y destruir claves según una política formal de ciclo de vida.
+- 32 bytes: construye CMAC con AES-256, procesa 16 bytes cero, finaliza CMAC y devuelve los tres primeros bytes en hexadecimal mayúsculo.
+- 16 o 24 bytes: cifra 8 bytes cero con Triple DES en ECB y devuelve los tres primeros bytes en hexadecimal mayúsculo.
+- Otra longitud: lanza un error porque el programa no define un cálculo para ella.
 
-La GUI muestra valores de referencia porque este es un ejercicio controlado. En un sistema real, esos valores deberían permanecer protegidos y gestionarse mediante una infraestructura de claves adecuada.
+### `validate_cmac_kcv(key, expected_kcv)`
+
+Calcula el KCV y lo compara con el esperado ignorando diferencias entre minúsculas y mayúsculas. Si difieren, levanta un error con ambos valores para ayudar a diagnosticar.
+
+### `wrap_tr31()` y `unwrap_tr31()`
+
+Delegan el formato TR-31 a la biblioteca `psec`. En el flujo de importación, `unwrap_tr31()` recibe el bloque y la KEK, y devuelve la clave una vez que la biblioteca procesa el bloque.
+
+### `LocalDUKPTServer` y `decrypt_bonus_dukpt()`
+
+`LocalDUKPTServer` genera el IPEK y procesa el KSN para derivar la clave. `decrypt_bonus_dukpt()` usa esa clave para descifrar el ciphertext fijo del bonus y devuelve tanto la clave como los bytes descifrados. La GUI elimina el relleno nulo final y convierte esos bytes a texto.
+
+## 15. Precisión y límites de seguridad
+
+- Este es un ejercicio didáctico, no un HSM ni un sistema de pagos listo para producción.
+- Los KCV de 3 bytes son comprobaciones cortas; no sustituyen autenticación criptográfica fuerte.
+- TR-31 protege el transporte de claves y sus atributos; no debe confundirse con el KCV mostrado aparte.
+- La interfaz de demostración muestra algunos valores sensibles, como la BDK y la clave derivada. En producción se evitaría exponerlos y se usaría un HSM y controles de acceso.
+- El bonus usa 3DES-ECB porque esos son los algoritmos/datos definidos por este reto. No es una recomendación para diseñar cifrado nuevo.
+- `TripleDES` aparece con avisos de obsolescencia en algunas versiones recientes de `cryptography`; esto no cambia el resultado de este ejercicio, pero sí sería una tarea de mantenimiento al migrar a una versión futura.
+
+## 16. Resultado de referencia
+
+Con los datos de ejemplo y el código actual, los resultados comprobados son:
+
+```text
+KEK       C5A5117469A79C794720B20989257444AD33FF4F7659851A0DD727F555E74D61
+KCV KEK   F74B90
+BDK       39EDE3A9437F3FF561898D1F6FABBD25
+KCV BDK   EABBDC
+DUKPT key F0BBF26A9B1D48220ED642709E5C4454
+Mensaje   MELI_Rocks!
+```
